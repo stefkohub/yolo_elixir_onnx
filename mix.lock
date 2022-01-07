@@ -2,6 +2,7 @@
   "apex": {:hex, :apex, "1.0.0", "abf230314d35ca4c48a902f693247f190ad42fc14862b9c4f7dbb7077b21c20a", [:mix], [], "hexpm", "64bc3f7e3a9f528b188650d5e975be9427c681000ea0174dbb8e284f02d04de1"},
   "axon": {:git, "https://github.com/elixir-nx/axon", "c5e1f9edf11d5b1b2e83738d49c85fe26b7a07a9", [tag: "main"]},
   "axon_onnx": {:git, "https://github.com/stefkohub/axon_onnx", "6d8d72ea5acc59a18714db911b3302b7f05ac685", []},
+  "cimg": {:git, "https://github.com/shoz-f/cimg_ex.git", "682048ccdd1bf9167d9f0dafd672434fec67413d", []},
   "elixir_make": {:hex, :elixir_make, "0.6.3", "bc07d53221216838d79e03a8019d0839786703129599e9619f4ab74c8c096eac", [:mix], [], "hexpm", "f5cbd651c5678bcaabdbb7857658ee106b12509cd976c2c2fca99688e1daf716"},
   "evision": {:git, "https://github.com/cocoa-xu/evision.git", "965bd6358ab3bcf0e50a1ea03d000595c2108e61", [branch: "main"]},
   "exla": {:git, "https://github.com/elixir-nx/nx.git", "593d4703bbd82d2d94535e4b3917faa1028f7e01", [sparse: "exla"]},

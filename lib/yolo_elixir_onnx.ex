@@ -4,6 +4,7 @@ defmodule YoloElixirOnnx do
   """
 
   require Axon
+  require Logger
 
   alias YoloElixirOnnx.Preprocessing
 
@@ -12,17 +13,54 @@ defmodule YoloElixirOnnx do
   @classes_filename "../YoloWeights/coco.names"
 
   @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> YoloElixirOnnx.hello()
-      :world
 
   """
-  def hello do
-    :world
+
+  def parse_yolo_region(blob, resized_image_shape, original_im_shape, params, threshold \\ 0.4) do
+    {_, _, out_blob_h, out_blob_w} = blob.shape
+    {orig_im_h, orig_im_w} = original_im_shape
+    {resized_image_h, resized_image_w} = resized_image_shape
+    predictions = Nx.flatten(blob)
+    side = elem(params.side, 0)
+    side_square = side * side
+    params = Map.put_new(params, :isYoloV3, true)
+
+    objects = for i <- 0..side_square-1 do
+      row = div(i, side)
+      col = rem(i, side)
+      for n <- 0..params.num-1 do
+        obj_index = Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, params.coords)
+        scale = predictions[obj_index]|>Nx.to_number
+        if scale > threshold do
+          IO.puts "#{scale} > #{threshold}"
+          box_index = Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, 0)
+          x = (col + Nx.to_number(predictions[box_index + 0 * side_square])) / side
+          y = (row + Nx.to_number(predictions[box_index + 1 * side_square])) / side
+          w_exp = Nx.exp(predictions[box_index + 2 * side_square])|>Nx.to_number
+          h_exp = Nx.exp(predictions[box_index + 3 * side_square])|>Nx.to_number
+          # Depends on topology we need to normalize sizes by feature maps (up to YOLOv3) or by input shape (YOLOv3)
+          w = w_exp * Enum.at(params.anchors,2 * n) / (params.isYoloV3 == true && resized_image_w  || side)
+          h = h_exp * Enum.at(params.anchors,2 * n + 1) / (params.isYoloV3 == true && resized_image_h || side)
+
+          for j <- 0..params.classes-1 do
+            class_index = 
+              Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, params.coords + 1 + j)
+            confidence = Nx.dot(scale, predictions[class_index])|>Nx.to_number
+            if confidence > threshold do
+              Preprocessing.scale_bbox(x, y, h, w, j, confidence, orig_im_h, orig_im_w)
+            else
+              IO.puts "Confidence<threshold"
+              nil
+            end
+          end
+        else
+          IO.puts "scale #{scale} < threshold #{threshold}"
+          nil
+        end
+      end
+    end
   end
+
 
   def main(imgPath) do
     IO.puts "Loading ONNX model..."
@@ -54,15 +92,16 @@ defmodule YoloElixirOnnx do
     # TODO: Add labels...
 
     IO.puts "Preprocessing input image..."
-    image = Mogrify.open(imgPath)|>Mogrify.verbose
-    {_, _, _, imgData} = Preprocessing.image_preprocess(image, [416, 416])
+    # image = Mogrify.open(imgPath)|>Mogrify.verbose
+    image = CImg.load(imgPath)
+    {image_width, image_height, _, _}=CImg.shape(image)
+    %{data: imgData, descr: _, fortran_order: _, shape: _} = Preprocessing.image_preprocess(image, [416, 416])
     # Change data layout from HWC to CHW
     in_frame = 
       imgData
-      |> Nx.from_binary({:u, 8})
+      |> Nx.from_binary({:f, 32})
       |> Nx.reshape({n, c, h, w})
-      # |> Nx.transpose(axes: [0,1,3,2])
-      # |> Nx.divide(255)
+      |> Nx.divide(255)
     IO.puts "Getting output values..."
     start_time = Time.utc_now
     output = Enum.zip(output_layer_names, Tuple.to_list(Axon.predict(model_tuple, model_params, in_frame, compiler: EXLA)))
@@ -76,7 +115,7 @@ defmodule YoloElixirOnnx do
         {_,_,h,w} = in_frame.shape
         # in_frame_shape = {h,w}
         # image_shape = {image.height, image.width}
-        Preprocessing.parse_yolo_region(out_blob, {h,w}, {image.height, image.width}, yolo_params)
+        parse_yolo_region(out_blob, {h,w}, {image_height, image_width}, yolo_params)
       end
     parsing_time = Time.diff(Time.utc_now, start_time)
     IO.puts "Tempo per inferenza: #{parsing_time}s"
@@ -84,7 +123,7 @@ defmodule YoloElixirOnnx do
       objects
       |> Enum.concat
       |> Enum.filter(fn x -> x != nil end)
-      |> Enum.sort_by(& &1.confidence) #, fn a, b -> a>b end)
+      |> Enum.sort_by(& &1.confidence) 
       |> Enum.group_by(& &1.class_id)
 
     IO.puts("1 Adesso objects=#{Enum.count(objects)}")

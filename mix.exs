@@ -25,9 +25,10 @@ defmodule YoloElixirOnnx.MixProject do
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
       # {:imagineer, git: "https://github.com/tyre/imagineer.git", tag: "master"}
       {:mogrify, "~> 0.9.1"},
+      {:cimg, git: "https://github.com/shoz-f/cimg_ex.git"},
       # {:imgutils, "~> 0.1.1"},
       # {:axon, "~> 0.1.0-dev", github: "elixir-nx/axon"},
-      # {:evision, "~> 0.1.0-dev", github: "cocoa-xu/evision", branch: "main"},
+      {:evision, "~> 0.1.0-dev", github: "cocoa-xu/evision", branch: "main"},
       # {:nx_evision, "~> 0.1.0-dev", github: "zeam-vm/nx_evision", branch: "main"},
       {:axon, git: "https://github.com/elixir-nx/axon", tag: "main", override: true},
       {:axon_onnx, git: "https://github.com/stefkohub/axon_onnx", override: true},

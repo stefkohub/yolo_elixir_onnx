@@ -1,7 +1,8 @@
 defmodule YoloElixirOnnx.Preprocessing do
 
   def letterbox(img, [w, h] \\ [640, 640], color \\ [114, 114, 114], auto \\ True, scaleFill \\ False, scaleup \\ True) do
-    shape = [h: img.height, w: img.width]  # current shape [height, width]
+    {width, height, _, _} = CImg.shape(img)
+    shape = [h: height, w: width]  # current shape [height, width]
 
     ## Scale ratio (new / old)
     r = min(h / shape[:h], w / shape[:w])
@@ -18,15 +19,20 @@ defmodule YoloElixirOnnx.Preprocessing do
     end
 
     img = if Enum.reverse(shape) != new_unpad do  # resize
+      IO.puts "resize"
       resizeImg(img, new_unpad)
     else
       img
     end
-    copyMakeBorder(img, new_unpad, color) # add border
+    img
+    # copyMakeBorder(img, new_unpad, color) # add border
   end
 
   def resizeImg(img, new_unpad, interpolation \\ :INTER_LINEAR) do
-    img |> Mogrify.resize_to_limit(Integer.to_string(new_unpad[:h])<>"x"<>Integer.to_string(new_unpad[:w]))
+    # img |> Mogrify.resize_to_limit(Integer.to_string(new_unpad[:h])<>"x"<>Integer.to_string(new_unpad[:w]))
+    IO.puts "new_unpad: #{inspect(new_unpad)}"
+    img 
+    |> CImg.resize({new_unpad[:h], new_unpad[:w]})
   end
 
   def copyMakeBorder(img, new_unpad, color) do
@@ -39,7 +45,8 @@ defmodule YoloElixirOnnx.Preprocessing do
 
   def openImage(imgpath) do
     # TODO: Add sanity checks...
-    Mogrify.open(imgpath)|>Mogrify.verbose
+    # Mogrify.open(imgpath)|>Mogrify.verbose
+    CImg.load(imgpath)
   end
   
   def identifyImage(imgpath) do
@@ -50,7 +57,7 @@ defmodule YoloElixirOnnx.Preprocessing do
 
   def saveImage(img, imgpath \\ nil) do
     # TODO: Add checks on imgpath
-    imgpath && Mogrify.save(img, path: imgpath) || Mogrify.save(img)
+    imgpath && CImg.save(img, imgpath) || raise ArgumentError, "empty imgpath"
   end
 
   def scale_bbox(x, y, height, width, class_id, confidence, im_h, im_w, resized_im_h \\ 640, resized_im_w \\ 640) do
@@ -71,10 +78,10 @@ defmodule YoloElixirOnnx.Preprocessing do
   end
 
   def entry_index(side, coord, classes, location, entry) do
-    side_power_2 = :math.pow(side, 2)
+    side_power_2 = trunc(:math.pow(side, 2))
     n = Integer.floor_div(location, side_power_2)
     loc = rem(location , side_power_2)
-    side_power_2 * (n * (coord + classes + 1) + entry) + loc
+    trunc(side_power_2 * (n * (coord + classes + 1) + entry) + loc)
   end
 
   @doc """
@@ -159,21 +166,21 @@ defmodule YoloElixirOnnx.Preprocessing do
   end
 
   def getImageData(img) do
-    {:ok, imgFile} = File.open(img.path, [:read, :binary])
-    header = IO.binread(imgFile, 15)
-    imgData = IO.binread(imgFile, :all)
-    [_, w, h, maxVal] = String.split(header)
-    File.close(imgFile)
-    {w, h, maxVal, imgData}
+    #{:ok, imgFile} = File.open(img.path, [:read, :binary])
+    #header = IO.binread(imgFile, 15)
+    #imgData = IO.binread(imgFile, :all)
+    #[_, w, h, maxVal] = String.split(header)
+    #File.close(imgFile)
+    #{w, h, maxVal, imgData}
+    img
   end
 
   def image_preprocess(img, target_size, gt_boxes \\ nil) do
     # original_img_size = [img.width, img.height]
-    img = convert_to_ppm(img)
+    # img = convert_to_ppm(img)
     # {width, heigth, maxRGB, boxed_img} = 
     letterbox(img, Enum.reverse(target_size))
-      |>saveImage()
-      |>getImageData()
+      |> CImg.to_flat([dtype: "<f4", nchw: true])
   end
 
   def yoloParams(side, yolo_type, param \\ []) do
