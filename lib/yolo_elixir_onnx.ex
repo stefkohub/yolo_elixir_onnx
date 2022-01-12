@@ -8,65 +8,22 @@ defmodule YoloElixirOnnx do
 
   alias YoloElixirOnnx.Preprocessing
 
+  EXLA.set_preferred_defn_options([:tpu, :cuda, :rocm, :host])
+
   @iou_threshold 0.4
   @prob_threshold 0.5
   @classes_filename "../YoloWeights/coco.names"
+  @onnx_model_filename "../YoloWeights/yolov3-tiny-416.onnx"
+  # @onnx_model_filename "../tensorrt_demos/yolo/yolov3-tiny-416.onnx"
 
   @doc """
 
   """
-
-  def parse_yolo_region(blob, resized_image_shape, original_im_shape, params, threshold \\ 0.4) do
-    {_, _, out_blob_h, out_blob_w} = blob.shape
-    {orig_im_h, orig_im_w} = original_im_shape
-    {resized_image_h, resized_image_w} = resized_image_shape
-    predictions = Nx.flatten(blob)
-    side = elem(params.side, 0)
-    side_square = side * side
-    params = Map.put_new(params, :isYoloV3, true)
-
-    objects = for i <- 0..side_square-1 do
-      row = div(i, side)
-      col = rem(i, side)
-      for n <- 0..params.num-1 do
-        obj_index = Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, params.coords)
-        scale = predictions[obj_index]|>Nx.to_number
-        if scale > threshold do
-          IO.puts "#{scale} > #{threshold}"
-          box_index = Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, 0)
-          x = (col + Nx.to_number(predictions[box_index + 0 * side_square])) / side
-          y = (row + Nx.to_number(predictions[box_index + 1 * side_square])) / side
-          w_exp = Nx.exp(predictions[box_index + 2 * side_square])|>Nx.to_number
-          h_exp = Nx.exp(predictions[box_index + 3 * side_square])|>Nx.to_number
-          # Depends on topology we need to normalize sizes by feature maps (up to YOLOv3) or by input shape (YOLOv3)
-          w = w_exp * Enum.at(params.anchors,2 * n) / (params.isYoloV3 == true && resized_image_w  || side)
-          h = h_exp * Enum.at(params.anchors,2 * n + 1) / (params.isYoloV3 == true && resized_image_h || side)
-
-          for j <- 0..params.classes-1 do
-            class_index = 
-              Preprocessing.entry_index(side, params.coords, params.classes, n * side_square + i, params.coords + 1 + j)
-            confidence = Nx.dot(scale, predictions[class_index])|>Nx.to_number
-            if confidence > threshold do
-              Preprocessing.scale_bbox(x, y, h, w, j, confidence, orig_im_h, orig_im_w)
-            else
-              IO.puts "Confidence<threshold"
-              nil
-            end
-          end
-        else
-          IO.puts "scale #{scale} < threshold #{threshold}"
-          nil
-        end
-      end
-    end
-  end
-
-
   def main(imgPath) do
     IO.puts "Loading ONNX model..."
-    {model, starting_params} = AxonOnnx.Deserialize.__import__("../YoloWeights/yolov3-tiny-416.onnx")
+    {model, starting_params} = AxonOnnx.Deserialize.__import__(@onnx_model_filename)
     model_signature = for m <- model, do: Axon.get_model_signature(m)
-    model_tuple = List.to_tuple(model)
+    model_tuple = List.to_tuple(Enum.map(model, fn m -> Axon.freeze(m) end))
     # mah...
     {n,c,h,w} = Enum.at(model_signature, 1)|>Tuple.to_list|>Enum.at(0)|>Tuple.to_list|>Enum.at(0)
 
@@ -84,6 +41,7 @@ defmodule YoloElixirOnnx do
       yolo_params = Preprocessing.yoloParams(shape, "yolov3-tiny", node.opts)
       {layer_name, [shape, yolo_params]}
     end
+    IO.puts inspect(yolo_layer_params)
     output_layer_names = Map.keys(yolo_layer_params)
 
     IO.puts "Initializing Axon model..."
@@ -93,32 +51,65 @@ defmodule YoloElixirOnnx do
 
     IO.puts "Preprocessing input image..."
     # image = Mogrify.open(imgPath)|>Mogrify.verbose
-    image = CImg.load(imgPath)
-    {image_width, image_height, _, _}=CImg.shape(image)
-    %{data: imgData, descr: _, fortran_order: _, shape: _} = Preprocessing.image_preprocess(image, [416, 416])
-    # Change data layout from HWC to CHW
+    {:ok, image} = OpenCV.imread(imgPath)
+    {:ok, image_type} = OpenCV.Mat.type(image)
+    {:ok, {image_height, image_width, image_channels}}=OpenCV.Mat.shape(image)
+    # prima provo col resize... poi vediamo di includere di nuovo letterbox
     in_frame = 
-      imgData
-      |> Nx.from_binary({:f, 32})
+      # OpenCV.resize(image, [w, h])
+      OpenCV.transpose(image, axes: [2, 0, 1])
+      |> case do
+        {:ok, res} -> Preprocessing.letterbox(res, [w, h])
+        _ -> raise "Error in transpose"
+      end
+      |> OpenCV.Mat.to_binary
+      |> case do 
+        {:ok, res} -> Nx.from_binary(res, image_type)
+        _ -> raise "Error in Mat.to_binary"
+      end
+      # |> Nx.reshape({w, h, image_channels})
       |> Nx.reshape({n, c, h, w})
-      |> Nx.divide(255)
-    IO.puts "Getting output values..."
+      |> Nx.divide(255.0)
+
+    IO.puts "Getting output values from #{inspect(in_frame)}..."
     start_time = Time.utc_now
-    output = Enum.zip(output_layer_names, Tuple.to_list(Axon.predict(model_tuple, model_params, in_frame, compiler: EXLA)))
+    model_params = %{ model_params | "016_convolutional" => Map.merge(model_params["016_convolutional"], %{ "bias" => starting_params["016_convolutional_bias"] })}
+    model_params = %{ model_params | "023_convolutional" => Map.merge(model_params["023_convolutional"], %{ "bias" => starting_params["023_convolutional_bias"] })}
+    kernels = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_kernel.*/) end)
+    betas = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_beta.*/) end)
+    model_params=for {k, _v} <- model_params do
+      kname = k<>"_kernel"
+      if kname in kernels,
+        do: { k, Map.merge(model_params[k], %{ "kernel" => starting_params[kname] })},
+        else: { k, model_params[k]}
+      end 
+    model_params=for {b, v} <- model_params do
+        bname = b<>"_beta"
+        if bname in betas,
+          do: { b, Map.merge(v, %{ "beta" => starting_params[bname] })},
+          else: { b, v}
+      end |> Enum.into(%{})
+
+    output = Tuple.to_list(Axon.predict(model_tuple, model_params, in_frame, compiler: EXLA))
 
     parsing_time = Time.diff(Time.utc_now, start_time)
     IO.puts "Tempo per output: #{parsing_time}s"
     
     objects = 
-      for {layer_name, out_blob} <- output do
+      # for {layer_name, out_blob} <- output do
+      for id <- 0..Enum.count(output_layer_names)-1 do
+        layer_name = Enum.at(output_layer_names, id)
+        out_blob = Enum.at(output, id)
         [shape, yolo_params] = yolo_layer_params[layer_name]
         {_,_,h,w} = in_frame.shape
         # in_frame_shape = {h,w}
         # image_shape = {image.height, image.width}
-        parse_yolo_region(out_blob, {h,w}, {image_height, image_width}, yolo_params)
+        IO.inspect([out_blob, {h,w}, {image_height, image_width}, yolo_params])
+        Preprocessing.parse_yolo_region(out_blob, {h,w}, {image_height, image_width}, yolo_params)
       end
     parsing_time = Time.diff(Time.utc_now, start_time)
     IO.puts "Tempo per inferenza: #{parsing_time}s"
+    IO.puts(inspect(objects))
     objects = 
       objects
       |> Enum.concat
@@ -127,6 +118,12 @@ defmodule YoloElixirOnnx do
       |> Enum.group_by(& &1.class_id)
 
     IO.puts("1 Adesso objects=#{Enum.count(objects)}")
+    IO.puts("1 Adesso objects=")
+    Enum.map(objects, fn {class_id, class} -> 
+      Enum.each(class, fn i -> 
+        IO.puts("class_id: #{class_id}, confidence: #{i.confidence}") 
+      end) 
+    end)
 
     start_time = Time.utc_now
     objects = 

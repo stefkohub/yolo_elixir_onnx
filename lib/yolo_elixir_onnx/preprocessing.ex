@@ -1,7 +1,9 @@
 defmodule YoloElixirOnnx.Preprocessing do
 
+  import Nx.Defn
+
   def letterbox(img, [w, h] \\ [640, 640], color \\ [114, 114, 114], auto \\ True, scaleFill \\ False, scaleup \\ True) do
-    {width, height, _, _} = CImg.shape(img)
+    {:ok, {height, width, _channels}}=OpenCV.Mat.shape(img)
     shape = [h: height, w: width]  # current shape [height, width]
 
     ## Scale ratio (new / old)
@@ -12,47 +14,41 @@ defmodule YoloElixirOnnx.Preprocessing do
       r
     end
     # Compute padding
-    new_unpad = if scaleFill do  # stretch
-      [ h: w, w: h ]
+    new_unpad = {trunc(round(shape[:h] * r)), trunc(round(shape[:w] * r))}
+    {dw, dh}={w - elem(new_unpad,0), h - elem(new_unpad,1)}
+    {dw, dh, new_unpad} = if scaleFill do  # stretch
+      {0.0, 0.0, [ h: w, w: h ]}
     else
-      [ h: (round(shape[:w] * r)), w: (round(shape[:h] * r)) ]
+      {dw, dh} = (auto == true && {rem(dw, 64), rem(dh, 64)} || {dw, dh})
+      {dw, dh, [ h: (round(shape[:w] * r)), w: (round(shape[:h] * r)) ]}
     end
 
     img = if Enum.reverse(shape) != new_unpad do  # resize
-      IO.puts "resize"
-      resizeImg(img, new_unpad)
+      IO.puts "resize"<>inspect([img, new_unpad])
+      {:ok, img}=OpenCV.resize(img, [new_unpad[:h], new_unpad[:w]], interpolation: OpenCV.cv_inter_linear) 
+      img
     else
       img
     end
+    {top, bottom} = {trunc(round(dh - 0.1)), trunc(round(dh + 0.01))}
+    {left, right} = {trunc(round(dw - 0.1)), trunc(round(dw + 0.01))}
+    {:ok, img} = OpenCV.copymakeborder(img, top, bottom, left, right, OpenCV.cv_border_constant, value: color)
+    top2 = bottom2 = left2 = right2 = 0
+    {:ok, {img_shape_0, img_shape_1, _channels}}=OpenCV.Mat.shape(img)
+    img = cond do
+      img_shape_0 != h ->
+        top2 = div(h - img_shape_0,2)
+        bottom2 = top2
+        {:ok, img}=OpenCV.copymakeborder(img, top2, bottom2, left2, right2, OpenCV.cv_border_constant, value: color)  # add border
+        img
+      img_shape_1 != w ->
+        left2 = div(w - img_shape_1, 2)
+        right2 = left2
+        {:ok, img}=OpenCV.copymakeborder(img, top2, bottom2, left2, right2, OpenCV.cv_border_constant, value: color)  # add border
+        img
+      true -> img
+      end
     img
-    # copyMakeBorder(img, new_unpad, color) # add border
-  end
-
-  def resizeImg(img, new_unpad, interpolation \\ :INTER_LINEAR) do
-    # img |> Mogrify.resize_to_limit(Integer.to_string(new_unpad[:h])<>"x"<>Integer.to_string(new_unpad[:w]))
-    IO.puts "new_unpad: #{inspect(new_unpad)}"
-    img 
-    |> CImg.resize({new_unpad[:h], new_unpad[:w]})
-  end
-
-  def copyMakeBorder(img, new_unpad, color) do
-    hexColor = "#" <> (for c <- color do Integer.to_string(c, 16) end|>Enum.join)
-    img
-    |> Mogrify.custom("background", hexColor)
-    |> Mogrify.gravity("center")
-    |> Mogrify.extent("#{new_unpad[:h]}x#{new_unpad[:w]}")
-  end
-
-  def openImage(imgpath) do
-    # TODO: Add sanity checks...
-    # Mogrify.open(imgpath)|>Mogrify.verbose
-    CImg.load(imgpath)
-  end
-  
-  def identifyImage(imgpath) do
-    info = Mogrify.identify(imgpath)
-    IO.inspect(info)
-    info
   end
 
   def saveImage(img, imgpath \\ nil) do
@@ -84,6 +80,10 @@ defmodule YoloElixirOnnx.Preprocessing do
     trunc(side_power_2 * (n * (coord + classes + 1) + entry) + loc)
   end
 
+  defn create_predictions_tensor(blob) do
+    1.0 / (1.0+Nx.exp(-blob))
+  end
+
   @doc """
     blob must be an Nx tensor
     predictions must be an Nx tensor
@@ -91,9 +91,11 @@ defmodule YoloElixirOnnx.Preprocessing do
   def parse_yolo_region(blob, resized_image_shape, original_im_shape, params, threshold \\ 0.5, yolo_type \\ "yolov3-tiny") do
     # ------------------------------------------ Validating output parameters ------------------------------------------
     { _, out_blob_c, out_blob_h, out_blob_w } = blob.shape
-    predictions = Nx.divide(1,blob|>Nx.negate|>Nx.exp|>Nx.add(1))
+    IO.puts "PRIMA: "<>inspect(blob)
+    predictions = create_predictions_tensor(blob) #Nx.divide(1,blob|>Nx.negate|>Nx.exp|>Nx.add(1))
+    IO.puts "DOPO: "<>inspect(predictions)
     if out_blob_w != out_blob_h do
-     raise "Invalid size of output blob. It sould be in NCHW layout and height should be equal to width. Current height = [#{out_blob_h}, current width = #{out_blob_w}" \
+     raise "Invalid size of output blob. It sould be in NCHW layout and height should be equal to width. Current height = #{out_blob_h}, current width = #{out_blob_w}" \
     end
     # ------------------------------------------ Extracting layer parameters -------------------------------------------
     {orig_im_h, orig_im_w} = original_im_shape
@@ -107,15 +109,12 @@ defmodule YoloElixirOnnx.Preprocessing do
 
     objects = for row <- 0..elem(params.side,0)-1, col <- 0..elem(params.side,1)-1, n <- 0..params.num-1 do
       # IO.puts "Coordinate predictions: 0,#{inspect(n*bbox_size..(n+1)*bbox_size)}, #{row}, #{col}, #{n}"
-      bbox = predictions[0][n*bbox_size..((n+1)*bbox_size)-1][row][col]
+      bbox = predictions[[0,n*bbox_size..((n+1)*bbox_size)-1,row,col]]
       [ x, y, width, height, object_probability ] = Nx.to_flat_list(bbox[0..4])
+      IO.puts "x, y, width, height, object_probability"<>inspect([x, y, width, height, object_probability])
       { last_elem } = bbox.shape 
-      last_elem = last_elem - 1
-      class_probabilities = bbox[5..last_elem]
-      # IO.puts "object_probability=#{object_probability}"
+      class_probabilities = bbox[5..last_elem-1]
       if object_probability >= threshold do
-        # IO.puts("resized_image_w = " <>inspect(resized_image_w))
-        # IO.puts("out_blob_w = " <>inspect(out_blob_w))
         x = (2*x - 0.5 + col)*(resized_image_w/out_blob_w)
         y = (2*y - 0.5 + row)*(resized_image_h/out_blob_h)
 
@@ -142,9 +141,11 @@ defmodule YoloElixirOnnx.Preprocessing do
         class_id = Nx.argmax(Nx.dot(class_probabilities, object_probability))|>Nx.to_number
         confidence = Nx.dot(class_probabilities[class_id], object_probability)|>Nx.to_number
         scale_bbox(x, y, height, width, class_id, confidence, orig_im_h, orig_im_w, resized_image_h, resized_image_w)
+      else
+          nil
       end
     end
-    objects
+    Enum.filter(objects, fn x -> x != nil end)
   end
 
   def intersection_over_union(box_1, box_2) do
@@ -159,28 +160,6 @@ defmodule YoloElixirOnnx.Preprocessing do
     area_of_union = box_1_area + box_2_area - area_of_overlap
     # IO.puts "area_of_union=#{area_of_overlap}, #{area_of_union}"
     area_of_union == 0 && 0 || area_of_overlap / area_of_union
-  end
-
-  def convert_to_ppm(img) do
-    img |> Mogrify.format("ppm")
-  end
-
-  def getImageData(img) do
-    #{:ok, imgFile} = File.open(img.path, [:read, :binary])
-    #header = IO.binread(imgFile, 15)
-    #imgData = IO.binread(imgFile, :all)
-    #[_, w, h, maxVal] = String.split(header)
-    #File.close(imgFile)
-    #{w, h, maxVal, imgData}
-    img
-  end
-
-  def image_preprocess(img, target_size, gt_boxes \\ nil) do
-    # original_img_size = [img.width, img.height]
-    # img = convert_to_ppm(img)
-    # {width, heigth, maxRGB, boxed_img} = 
-    letterbox(img, Enum.reverse(target_size))
-      |> CImg.to_flat([dtype: "<f4", nchw: true])
   end
 
   def yoloParams(side, yolo_type, param \\ []) do

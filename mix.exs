@@ -29,7 +29,7 @@ defmodule YoloElixirOnnx.MixProject do
       # {:imgutils, "~> 0.1.1"},
       # {:axon, "~> 0.1.0-dev", github: "elixir-nx/axon"},
       {:evision, "~> 0.1.0-dev", github: "cocoa-xu/evision", branch: "main"},
-      # {:nx_evision, "~> 0.1.0-dev", github: "zeam-vm/nx_evision", branch: "main"},
+      {:nx_evision, "~> 0.1.0-dev", github: "zeam-vm/nx_evision", branch: "main"},
       {:axon, git: "https://github.com/elixir-nx/axon", tag: "main", override: true},
       {:axon_onnx, git: "https://github.com/stefkohub/axon_onnx", override: true},
       {:exla, "~> 0.1.0-dev", github: "elixir-nx/nx", sparse: "exla"},
