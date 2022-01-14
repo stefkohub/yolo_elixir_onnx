@@ -15,7 +15,7 @@ defmodule YoloElixirOnnx do
   @classes_filename "../YoloWeights/coco.names"
   @onnx_model_filename "../YoloWeights/yolov3-tiny-416.onnx"
   # @onnx_model_filename "../tensorrt_demos/yolo/yolov3-tiny-416.onnx"
-
+  
   @doc """
 
   """
@@ -23,14 +23,16 @@ defmodule YoloElixirOnnx do
     IO.puts "Loading ONNX model..."
     {model, starting_params} = AxonOnnx.Deserialize.__import__(@onnx_model_filename)
     model_signature = for m <- model, do: Axon.get_model_signature(m)
-    model_tuple = List.to_tuple(Enum.map(model, fn m -> Axon.freeze(m) end))
+    # model_tuple = List.to_tuple(Enum.map(model, fn m -> Axon.freeze(m) end))
+    model_tuple = List.to_tuple(model)
     # mah...
-    {n,c,h,w} = Enum.at(model_signature, 1)|>Tuple.to_list|>Enum.at(0)|>Tuple.to_list|>Enum.at(0)
+    #{n,c,h,w} = Enum.at(model_signature, 1)|>Tuple.to_list|>Enum.at(0)|>Tuple.to_list|>Enum.at(0)
+    {{n,c,h,w}, _} = Enum.at(model_signature, 0)
 
     IO.puts "Loading class names..."
     {:ok, labels_map} = File.open(@classes_filename, [:read], fn file -> 
       names = IO.read(file, :all)|>String.split("\n")|>Enum.with_index
-      for {n, i} <- names, into: %{}, do: {i,n}
+      for {n, i} <- names, n != "", into: %{}, do: {i,n}
     end)
 
     IO.puts "Preparing inputs..."
@@ -50,46 +52,57 @@ defmodule YoloElixirOnnx do
     # TODO: Add labels...
 
     IO.puts "Preprocessing input image..."
-    # image = Mogrify.open(imgPath)|>Mogrify.verbose
     {:ok, image} = OpenCV.imread(imgPath)
     {:ok, image_type} = OpenCV.Mat.type(image)
     {:ok, {image_height, image_width, image_channels}}=OpenCV.Mat.shape(image)
-    # prima provo col resize... poi vediamo di includere di nuovo letterbox
+    
     in_frame = 
-      # OpenCV.resize(image, [w, h])
-      OpenCV.transpose(image, axes: [2, 0, 1])
+      OpenCV.resize(image, [w, h])
       |> case do
-        {:ok, res} -> Preprocessing.letterbox(res, [w, h])
+        {:ok, res} -> res #Preprocessing.letterbox(res, [w, h])
         _ -> raise "Error in transpose"
       end
-      |> OpenCV.Mat.to_binary
+      |> Preprocessing.letterbox([w, h])
+      |> OpenCV.transpose(axes: [2, 0, 1])
+      |> case do
+        {:ok, res} -> OpenCV.Mat.to_binary(res)
+        _ -> raise "Error in transpose"
+      end
       |> case do 
         {:ok, res} -> Nx.from_binary(res, image_type)
         _ -> raise "Error in Mat.to_binary"
       end
-      # |> Nx.reshape({w, h, image_channels})
       |> Nx.reshape({n, c, h, w})
-      |> Nx.divide(255.0)
+      # |> Nx.divide(255.0)
 
     IO.puts "Getting output values from #{inspect(in_frame)}..."
     start_time = Time.utc_now
-    model_params = %{ model_params | "016_convolutional" => Map.merge(model_params["016_convolutional"], %{ "bias" => starting_params["016_convolutional_bias"] })}
-    model_params = %{ model_params | "023_convolutional" => Map.merge(model_params["023_convolutional"], %{ "bias" => starting_params["023_convolutional_bias"] })}
-    kernels = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_kernel.*/) end)
-    betas = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_beta.*/) end)
-    model_params=for {k, _v} <- model_params do
-      kname = k<>"_kernel"
-      if kname in kernels,
-        do: { k, Map.merge(model_params[k], %{ "kernel" => starting_params[kname] })},
-        else: { k, model_params[k]}
-      end 
-    model_params=for {b, v} <- model_params do
-        bname = b<>"_beta"
-        if bname in betas,
-          do: { b, Map.merge(v, %{ "beta" => starting_params[bname] })},
-          else: { b, v}
-      end |> Enum.into(%{})
+    #model_params = %{ model_params | "016_convolutional" => Map.merge(model_params["016_convolutional"], %{ "bias" => starting_params["016_convolutional_bias"] })}
+    #model_params = %{ model_params | "023_convolutional" => Map.merge(model_params["023_convolutional"], %{ "bias" => starting_params["023_convolutional_bias"] })}
+    #kernels = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_kernel.*/) end)
+    #betas = Map.keys(starting_params)|>Enum.filter(fn x -> String.match?(x, ~r/.*_beta.*/) end)
+    #model_params=for {k, _v} <- model_params do
+    #  kname = k<>"_kernel"
+    #  if kname in kernels,
+    #    do: { k, Map.merge(model_params[k], %{ "kernel" => starting_params[kname] })},
+    #    else: { k, model_params[k]}
+    #  end 
+    #model_params=for {b, v} <- model_params do
+    #    bname = b<>"_beta"
+    #    if bname in betas,
+    #      do: { b, Map.merge(v, %{ "beta" => starting_params[bname] })},
+    #      else: { b, v}
+    #  end |> Enum.into(%{})
 
+    model_params = for {name,nmap} <- model_params, into: %{} do
+      { name, nmap
+        |> Enum.map(fn {k,_val} ->
+               sp_name = "#{name}_#{k}"
+               { k , starting_params[sp_name]}
+        end) 
+        |> Map.new
+      }
+    end
     output = Tuple.to_list(Axon.predict(model_tuple, model_params, in_frame, compiler: EXLA))
 
     parsing_time = Time.diff(Time.utc_now, start_time)
@@ -113,7 +126,7 @@ defmodule YoloElixirOnnx do
     objects = 
       objects
       |> Enum.concat
-      |> Enum.filter(fn x -> x != nil end)
+      |> Enum.filter(fn x -> x != nil || x !=  [] end)
       |> Enum.sort_by(& &1.confidence) 
       |> Enum.group_by(& &1.class_id)
 
@@ -153,6 +166,9 @@ defmodule YoloElixirOnnx do
     if Enum.count(objects)>0 do   #and args.raw_output_message:
       IO.puts("\nDetected boxes for batch 1")
       IO.puts(" Class ID | Confidence | XMIN | YMIN | XMAX | YMAX | COLOR ")
+      Enum.each(objects, fn o ->
+        IO.puts(" #{o.class_id} | #{o.confidence} | #{o.xmin} | #{o.ymin o.xmax}|#{o.ymax} | #{o.color}")
+      end)
     end
 
     objects

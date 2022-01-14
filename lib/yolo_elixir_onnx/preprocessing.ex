@@ -81,7 +81,7 @@ defmodule YoloElixirOnnx.Preprocessing do
   end
 
   defn create_predictions_tensor(blob) do
-    1.0 / (1.0+Nx.exp(-blob))
+    (1.0 / (1.0+Nx.exp(-blob)))
   end
 
   @doc """
@@ -110,8 +110,8 @@ defmodule YoloElixirOnnx.Preprocessing do
     objects = for row <- 0..elem(params.side,0)-1, col <- 0..elem(params.side,1)-1, n <- 0..params.num-1 do
       # IO.puts "Coordinate predictions: 0,#{inspect(n*bbox_size..(n+1)*bbox_size)}, #{row}, #{col}, #{n}"
       bbox = predictions[[0,n*bbox_size..((n+1)*bbox_size)-1,row,col]]
+      IO.puts "[ x, y, width, height, object_probability ]="<>inspect(Nx.to_flat_list(bbox[0..4]))
       [ x, y, width, height, object_probability ] = Nx.to_flat_list(bbox[0..4])
-      IO.puts "x, y, width, height, object_probability"<>inspect([x, y, width, height, object_probability])
       { last_elem } = bbox.shape 
       class_probabilities = bbox[5..last_elem-1]
       if object_probability >= threshold do
@@ -138,11 +138,16 @@ defmodule YoloElixirOnnx.Preprocessing do
             :math.pow(2*height,2) * Enum.at(params.anchors,idx * 6 + 2 * n + 1)
           }
         end
-        class_id = Nx.argmax(Nx.dot(class_probabilities, object_probability))|>Nx.to_number
-        confidence = Nx.dot(class_probabilities[class_id], object_probability)|>Nx.to_number
+        # class_id = Nx.argmax(Nx.dot(class_probabilities, object_probability))|>Nx.to_number
+        class_id = 
+          class_probabilities
+          |> Nx.dot(object_probability)
+          |> Nx.argmax
+          |> Nx.to_number
+        confidence = Nx.to_number(class_probabilities[class_id])*object_probability
         scale_bbox(x, y, height, width, class_id, confidence, orig_im_h, orig_im_w, resized_image_h, resized_image_w)
       else
-          nil
+        nil 
       end
     end
     Enum.filter(objects, fn x -> x != nil end)
